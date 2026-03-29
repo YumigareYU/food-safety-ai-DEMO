@@ -1,6 +1,9 @@
+plotly
 streamlit
 pandas
 numpy
 xgboost
-plotly
 scikit-learn
+lxml
+beautifulsoup4
+html5lib

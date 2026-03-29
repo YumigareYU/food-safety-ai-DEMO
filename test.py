@@ -8,40 +8,49 @@ from sklearn.preprocessing import LabelEncoder
 st.set_page_config(page_title="食研院-AI風險預測系統", layout="wide")
 st.title("🛡️ 國際食安風險：AI 預測與趨勢探索模式")
 
-# 2. 模擬數據 (代表從歐盟 RASFF 或 FDA 爬取後的結構化資料)
+# 2. 模擬數據
 
 
 @st.cache_data
 def get_historical_data():
     np.random.seed(42)
-    # 模擬 100 筆歷史通報紀錄
     data = {
         '月份': np.random.randint(1, 13, 100),
         '產品類別': np.random.choice(['冷凍蔬菜', '堅果', '水果', '香料', '海鮮'], 100),
         '風險原因': np.random.choice(['農藥', '毒素', '微生物', '添加物'], 100),
-        '通報強度': np.random.randint(1, 10, 100)  # 1-10 代表嚴重程度
+        '通報強度': np.random.randint(1, 10, 100)
     }
     df = pd.DataFrame(data)
-    # 建立目標變數：下個月是否會發生「嚴重通報」(強度 > 7)
     df['是否為高風險'] = (df['通報強度'] > 7).astype(int)
     return df
 
 
 df = get_historical_data()
 
-# 3. 模型訓練 (XGBoost)
-# 轉換類別資料為數值
-le_cat = LabelEncoder()
-le_risk = LabelEncoder()
-df['cat_encoded'] = le_cat.fit_transform(df['產品類別'])
-df['risk_encoded'] = le_risk.fit_transform(df['風險原因'])
+# --- 修改處：新增快取訓練函數 ---
 
-# 定義特徵與目標
-X = df[['月份', 'cat_encoded', 'risk_encoded']]
-y = df['是否為高風險']
 
-model = xgb.XGBClassifier(n_estimators=50, max_depth=3, learning_rate=0.1)
-model.fit(X, y)
+@st.cache_resource
+def train_xgboost_model(_df):
+    # 轉換類別資料
+    le_cat = LabelEncoder()
+    le_risk = LabelEncoder()
+    _df['cat_encoded'] = le_cat.fit_transform(_df['產品類別'])
+    _df['risk_encoded'] = le_risk.fit_transform(_df['風險原因'])
+
+    # 定義特徵與目標
+    X = _df[['月份', 'cat_encoded', 'risk_encoded']]
+    y = _df['是否為高風險']
+
+    # 建立模型
+    model = xgb.XGBClassifier(n_estimators=50, max_depth=3, learning_rate=0.1)
+    model.fit(X, y)
+    return model, le_cat, le_risk
+
+
+# 執行訓練並獲取快取結果
+model, le_cat, le_risk = train_xgboost_model(df)
+# ----------------------------
 
 # 4. 預測介面
 st.sidebar.header("🔮 預測情境設定")
@@ -56,7 +65,7 @@ input_data = pd.DataFrame([[
     le_risk.transform([target_risk])[0]
 ]], columns=['月份', 'cat_encoded', 'risk_encoded'])
 
-prob = model.predict_proba(input_data)[0][1]  # 取得高風險機率
+prob = model.predict_proba(input_data)[0][1]
 
 # 5. 畫面呈現
 col1, col2 = st.columns([1, 1])
@@ -72,7 +81,6 @@ with col1:
 
 with col2:
     st.subheader("📊 特徵影響力 (Feature Importance)")
-    # 展現 XGBoost 的解釋力
     importance = pd.DataFrame({
         '特徵': ['季節月份', '產品品項', '風險因子'],
         '權重': model.feature_importances_

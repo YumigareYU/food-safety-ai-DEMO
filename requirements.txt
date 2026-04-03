@@ -8,3 +8,4 @@ lxml
 beautifulsoup4
 html5lib
 openpyxl
+joblib

@@ -5,6 +5,8 @@ import xgboost as xgb
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import re
+import os        # <--- 新增這行
+import joblib
 
 # 1. 頁面配置
 st.set_page_config(page_title="食安風險預測系統", layout="wide")
@@ -143,11 +145,38 @@ FILE_PATH = "RASFF 202001-202512.xlsx"
 with st.spinner("正在讀取並解析大型資料庫，請稍候..."):
     df = load_and_preprocess_data(FILE_PATH)
 
-# 3. 模組化訓練與資料切分
 
-
+# 3. 模組化訓練與模型存取機制
 @st.cache_resource
-def train_multiple_models(_df):
+def load_or_train_models(_df):
+    MODEL_PATH = "rasff_trained_models.joblib"
+
+    # 情況 A：模型檔案已存在，直接讀取
+    if os.path.exists(MODEL_PATH):
+        saved_data = joblib.load(MODEL_PATH)
+        le_cat = saved_data['le_cat']
+        le_risk = saved_data['le_risk']
+
+        # 重新切分 2025 年資料並補上編碼欄位
+        df_recent = _df[_df['年份'] == 2025].copy(
+        ) if not _df.empty else pd.DataFrame()
+        if not df_recent.empty:
+            # 防呆機制：若有新資料出現舊模型沒看過的分類，預設補 0 避免 transform 報錯
+            df_recent['cat_encoded'] = df_recent['產品類別'].apply(
+                lambda x: le_cat.transform([x])[0] if x in le_cat.classes_ else 0)
+            df_recent['risk_encoded'] = df_recent['風險原因'].apply(
+                lambda x: le_risk.transform([x])[0] if x in le_risk.classes_ else 0)
+
+        return (
+            saved_data['model_all'],
+            saved_data['model_past'],
+            saved_data['model_recent'],
+            df_recent,
+            le_cat,
+            le_risk
+        )
+
+    # 情況 B：沒有模型檔案，啟動全新訓練
     if _df.empty:
         return None, None, None, None, None, None
 
@@ -178,11 +207,20 @@ def train_multiple_models(_df):
     model_past = train_xgb(df_past)
     model_recent = train_xgb(df_recent)
 
+    # 訓練完成後，將模型與編碼器打包存檔
+    joblib.dump({
+        'model_all': model_all,
+        'model_past': model_past,
+        'model_recent': model_recent,
+        'le_cat': le_cat,
+        'le_risk': le_risk
+    }, MODEL_PATH)
+
     return model_all, model_past, model_recent, df_recent, le_cat, le_risk
 
 
-with st.spinner("正在訓練歷史與近期模型..."):
-    model_all, model_past, model_recent, df_recent, le_cat, le_risk = train_multiple_models(
+with st.spinner("正在載入或訓練模型..."):
+    model_all, model_past, model_recent, df_recent, le_cat, le_risk = load_or_train_models(
         df)
 
 # 4. 介面呈現

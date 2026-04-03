@@ -5,8 +5,9 @@ import xgboost as xgb
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import re
-import os        # <--- 新增這行
+import os
 import joblib
+import altair as alt
 
 # 1. 頁面配置
 st.set_page_config(page_title="食安風險預測系統", layout="wide")
@@ -304,7 +305,13 @@ if model_all:
             '特徵': ['季節月份', '產品類別', '風險原因'],
             '權重': model_all.feature_importances_
         }).sort_values(by='權重', ascending=False)
-        st.bar_chart(imp_all.set_index('特徵'), color="#4C72B0")
+
+        # 改用 Altair 繪圖，labelAngle=0 讓文字擺正
+        chart_all = alt.Chart(imp_all).mark_bar(color="#4C72B0").encode(
+            x=alt.X('特徵:N', sort='-y', axis=alt.Axis(labelAngle=0, title=None)),
+            y=alt.Y('權重:Q', title='重要性權重')
+        ).properties(height=350)
+        st.altair_chart(chart_all, use_container_width=True)
 
     with c2:
         st.subheader("近期趨勢 (僅 2025 資料訓練)")
@@ -323,7 +330,15 @@ if model_all:
                 '特徵': ['季節月份', '產品類別', '風險原因'],
                 '權重': model_recent.feature_importances_
             }).sort_values(by='權重', ascending=False)
-            st.bar_chart(imp_recent.set_index('特徵'), color="#DD8452")
+
+            # 改用 Altair 繪圖，labelAngle=0 讓文字擺正
+            chart_recent = alt.Chart(imp_recent).mark_bar(color="#DD8452").encode(
+                x=alt.X('特徵:N', sort='-y',
+                        axis=alt.Axis(labelAngle=0, title=None)),
+                y=alt.Y('權重:Q', title='重要性權重')
+            ).properties(height=350)
+            st.altair_chart(chart_recent, use_container_width=True)
+
         else:
             st.error("❌ 缺乏 2025 年資料，無法訓練近期模型。")
 

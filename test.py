@@ -4,10 +4,10 @@ import numpy as np
 import xgboost as xgb
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-import re
 import os
 import joblib
 import altair as alt
+import shap
 
 # 1. 頁面配置
 st.set_page_config(page_title="食安風險預測系統", layout="wide")
@@ -105,7 +105,6 @@ def load_and_preprocess_data(file_path):
 
         df_raw = df_raw.dropna(subset=req_cols).copy()
 
-        # 時間特徵
         df_raw['date'] = pd.to_datetime(
             df_raw['date'], format='%d-%m-%Y %H:%M:%S', errors='coerce')
         if df_raw['date'].isnull().any():
@@ -116,19 +115,16 @@ def load_and_preprocess_data(file_path):
         df_raw['年份'] = df_raw['date'].dt.year.astype(int)
         df_raw['月份'] = df_raw['date'].dt.month.astype(int)
 
-        # 產品類別
         df_raw['產品類別_英'] = df_raw['category'].astype(
             str).str.lower().str.strip()
         df_raw['產品類別'] = df_raw['產品類別_英'].map(
             CATEGORY_DICT).fillna(df_raw['產品類別_英'])
 
-        # 風險原因
         df_raw['風險原因_英'] = df_raw['hazards'].astype(str).str.extract(
             r'\{(.*?)\}')[0].fillna('other/mixed').str.lower().str.strip()
         df_raw['風險原因'] = df_raw['風險原因_英'].map(
             HAZARD_DICT).fillna(df_raw['風險原因_英'])
 
-        # 預測目標：定義高風險
         high_risk_labels = ['serious', 'potentially serious']
         df_raw['是否為高風險'] = df_raw['risk_decision'].astype(
             str).str.lower().isin(high_risk_labels).astype(int)
@@ -140,29 +136,26 @@ def load_and_preprocess_data(file_path):
         return pd.DataFrame()
 
 
-# 檔案路徑設定
 FILE_PATH = "RASFF 202001-202512.xlsx"
 
 with st.spinner("正在讀取並解析大型資料庫，請稍候..."):
     df = load_and_preprocess_data(FILE_PATH)
 
-
 # 3. 模組化訓練與模型存取機制
+
+
 @st.cache_resource
 def load_or_train_models(_df):
     MODEL_PATH = "rasff_trained_models.joblib"
 
-    # 情況 A：模型檔案已存在，直接讀取
     if os.path.exists(MODEL_PATH):
         saved_data = joblib.load(MODEL_PATH)
         le_cat = saved_data['le_cat']
         le_risk = saved_data['le_risk']
 
-        # 重新切分 2025 年資料並補上編碼欄位
         df_recent = _df[_df['年份'] == 2025].copy(
         ) if not _df.empty else pd.DataFrame()
         if not df_recent.empty:
-            # 防呆機制：若有新資料出現舊模型沒看過的分類，預設補 0 避免 transform 報錯
             df_recent['cat_encoded'] = df_recent['產品類別'].apply(
                 lambda x: le_cat.transform([x])[0] if x in le_cat.classes_ else 0)
             df_recent['risk_encoded'] = df_recent['風險原因'].apply(
@@ -177,7 +170,6 @@ def load_or_train_models(_df):
             le_risk
         )
 
-    # 情況 B：沒有模型檔案，啟動全新訓練
     if _df.empty:
         return None, None, None, None, None, None
 
@@ -208,7 +200,6 @@ def load_or_train_models(_df):
     model_past = train_xgb(df_past)
     model_recent = train_xgb(df_recent)
 
-    # 訓練完成後，將模型與編碼器打包存檔
     joblib.dump({
         'model_all': model_all,
         'model_past': model_past,
@@ -224,15 +215,45 @@ with st.spinner("正在載入或訓練模型..."):
     model_all, model_past, model_recent, df_recent, le_cat, le_risk = load_or_train_models(
         df)
 
+# 繪製 SHAP 動態圖表的共用函數
+
+
+def plot_shap_altair(model, input_df, target_month, target_cat, target_risk):
+    explainer = shap.TreeExplainer(model)
+    shap_vals = explainer.shap_values(input_df)[0]
+
+    # 建立特徵名稱對應
+    feature_names = [f'月份 ({target_month}月)',
+                     f'類別 ({target_cat})', f'風險 ({target_risk})']
+
+    shap_df = pd.DataFrame({
+        '特徵': feature_names,
+        'SHAP值 (影響力)': shap_vals
+    })
+
+    # 區分正負向影響
+    shap_df['影響方向'] = shap_df['SHAP值 (影響力)'].apply(
+        lambda x: '推高風險' if x > 0 else '降低風險')
+
+    chart = alt.Chart(shap_df).mark_bar().encode(
+        x=alt.X('SHAP值 (影響力):Q', title='對預測機率的影響幅度 (Log Odds)'),
+        y=alt.Y('特徵:N', sort='-x', axis=alt.Axis(labelAngle=0, title=None)),
+        color=alt.Color('影響方向:N',
+                        scale=alt.Scale(domain=['推高風險', '降低風險'], range=[
+                                        '#d62728', '#1f77b4']),
+                        legend=alt.Legend(title="影響方向"))
+    ).properties(height=250)
+
+    return chart
+
+
 # 4. 介面呈現
 if model_all:
-    # 側邊欄：預測情境設定
     st.sidebar.header("🔮 預測情境設定")
     target_month = st.sidebar.slider("目標月份", 1, 12, 4)
     target_cat = st.sidebar.selectbox("待測產品類別", options=le_cat.classes_)
     target_risk = st.sidebar.selectbox("待測風險因子", options=le_risk.classes_)
 
-    # 側邊欄：模型參數調校
     st.sidebar.markdown("---")
     st.sidebar.header("⚙️ 模型參數調校")
     decision_threshold = st.sidebar.slider(
@@ -263,7 +284,6 @@ if model_all:
         X_test = df_recent[['月份', 'cat_encoded', 'risk_encoded']]
         y_test = df_recent['是否為高風險']
 
-        # 依據側邊欄設定的門檻重新計算預測結果
         y_prob_test = model_past.predict_proba(X_test)[:, 1]
         y_pred_dynamic = (y_prob_test >= decision_threshold).astype(int)
 
@@ -277,16 +297,14 @@ if model_all:
         col_m2.metric("高風險精準率 (Precision)", f"{prec:.1%}")
         col_m3.metric("高風險召回率 (Recall)", f"{rec:.1%}")
         col_m4.metric("F1-Score", f"{f1:.1%}")
-
-        st.caption(
-            f"💡 測試資料筆數：{len(df_recent)} 筆 (2025年)。嘗試調整左側「預警觸發門檻」，觀察 Precision 與 Recall 的權衡變化。")
     else:
         st.warning("⚠️ 2025 年可用資料筆數為 0，無法執行回測驗證。")
 
     st.markdown("---")
 
-    # 主畫面 2：多重模型預測與特徵比較
-    st.header("🔍 特徵板塊比較：長線與近期趨勢")
+    # 主畫面 2：多重模型預測與特徵比較 (導入動態 SHAP 解析)
+    st.header("🔍 動態情境解析：影響力追蹤")
+    st.caption("以下圖表顯示「當下設定條件」中，哪個因素是推高或降低風險的關鍵主因。")
     c1, c2 = st.columns(2)
 
     with c1:
@@ -294,24 +312,14 @@ if model_all:
         prob_all = model_all.predict_proba(input_data)[0][1]
         st.metric(label="高風險發生機率", value=f"{prob_all:.1%}")
 
-        # 連動決策門檻觸發警報
         if prob_all >= decision_threshold:
-            st.warning(
-                f"⚠️ 長線趨勢達標 ({prob_all:.1%} >= {decision_threshold})：建議加強抽驗。")
+            st.warning(f"⚠️ 預警：此組合長線風險達標 ({prob_all:.1%})。")
         else:
-            st.success("✅ 長線趨勢分析：處於安全範圍。")
+            st.success("✅ 長線趨勢處於安全範圍。")
 
-        imp_all = pd.DataFrame({
-            '特徵': ['季節月份', '產品類別', '風險原因'],
-            '權重': model_all.feature_importances_
-        }).sort_values(by='權重', ascending=False)
-
-        # 改用 Altair 繪圖，labelAngle=0 讓文字擺正
-        chart_all = alt.Chart(imp_all).mark_bar(color="#4C72B0").encode(
-            x=alt.X('特徵:N', sort='-y', axis=alt.Axis(labelAngle=0, title=None)),
-            y=alt.Y('權重:Q', title='重要性權重')
-        ).properties(height=350)
-        st.altair_chart(chart_all, use_container_width=True)
+        chart_all_shap = plot_shap_altair(
+            model_all, input_data, target_month, target_cat, target_risk)
+        st.altair_chart(chart_all_shap, use_container_width=True)
 
     with c2:
         st.subheader("近期趨勢 (僅 2025 資料訓練)")
@@ -319,25 +327,14 @@ if model_all:
             prob_recent = model_recent.predict_proba(input_data)[0][1]
             st.metric(label="高風險發生機率", value=f"{prob_recent:.1%}")
 
-            # 連動決策門檻觸發警報
             if prob_recent >= decision_threshold:
-                st.warning(
-                    f"⚠️ 近期趨勢達標 ({prob_recent:.1%} >= {decision_threshold})：近期高發，強烈建議監控。")
+                st.warning(f"⚠️ 預警：此組合近期高發 ({prob_recent:.1%})，強烈建議監控。")
             else:
-                st.success("✅ 近期趨勢分析：處於安全範圍。")
+                st.success("✅ 近期趨勢處於安全範圍。")
 
-            imp_recent = pd.DataFrame({
-                '特徵': ['季節月份', '產品類別', '風險原因'],
-                '權重': model_recent.feature_importances_
-            }).sort_values(by='權重', ascending=False)
-
-            # 改用 Altair 繪圖，labelAngle=0 讓文字擺正
-            chart_recent = alt.Chart(imp_recent).mark_bar(color="#DD8452").encode(
-                x=alt.X('特徵:N', sort='-y',
-                        axis=alt.Axis(labelAngle=0, title=None)),
-                y=alt.Y('權重:Q', title='重要性權重')
-            ).properties(height=350)
-            st.altair_chart(chart_recent, use_container_width=True)
+            chart_recent_shap = plot_shap_altair(
+                model_recent, input_data, target_month, target_cat, target_risk)
+            st.altair_chart(chart_recent_shap, use_container_width=True)
 
         else:
             st.error("❌ 缺乏 2025 年資料，無法訓練近期模型。")
